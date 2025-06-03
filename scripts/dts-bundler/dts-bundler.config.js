@@ -58,7 +58,7 @@ const config = {
 		preferredConfigPath: baseTsConfigPath,
 	},
 	entries: [
-		{
+		/* {
 			filePath: './pinpoint.d.ts',
 			outFile: join(corePackageSrcClientsPath, 'Pinpoint', 'types.ts'),
 			libraries: {
@@ -89,7 +89,7 @@ const config = {
 				inlinedLibraries: ['@aws-sdk/client-s3-control'],
 			},
 			output: outputConfig,
-		},
+		}, */
 		{
 			filePath: './cognito-identity-provider.d.ts',
 			outFile: join(
