@@ -57,7 +57,19 @@ jobs:
                 runs: [
                   ({
                     tool: .runs[0].tool,
-                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri),
+                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri) | map(
+                      if .fixes then
+                        . + {
+                          message: {
+                            text: .message.text,
+                            markdown: (.message.text + "\n\n**Remediation:** " + (.fixes[0].description.text // "See Snyk for details"))
+                          }
+                        }
+                      else . end
+                    ),
+                    automationDetails: {
+                      id: "Snyk/Open Source/amplify-js-merged/\(now | strftime("%Y-%m-%dT%H:%M:%S.000Z"))"
+                    },
                     properties: (.runs[0].properties // {})
                   } + (
                     [.runs[].originalUriBaseIds] | 
