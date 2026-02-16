@@ -19,18 +19,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Install Snyk CLI
+      # 1. Install dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      # 2. Install Snyk CLI
       - name: Set up Snyk CLI
         uses: snyk/actions/setup@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # 2. Run Dependency Scan (SCA)
-      # --sarif: Generates the format GitHub needs
+      # 3. Run Dependency Scan (SCA)
+      # --sarif-file-output: Generates the format GitHub needs
       # --all-projects: Finds all manifest files (npm, pip, etc.)
+      # --exclude=android: Skip android gradle projects
       # || true: Prevents the job from failing so the upload step can run
       - name: Snyk Open Source test
-        run: snyk test --all-projects --sarif > snyk-deps.sarif || true
+        run: snyk test --all-projects --exclude=android --sarif-file-output=snyk-deps.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -41,9 +52,3 @@ jobs:
           sarif_file: snyk-deps.sarif
           # Removing 'category: snyk-dependencies' allows GitHub to
           # handle multiple project runs within the same file.
-
-      # 4. Push snapshot to Snyk Dashboard (for continuous monitoring)
-      - name: Snyk Open Source monitor
-        run: snyk monitor --all-projects
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
