@@ -37,7 +37,7 @@ jobs:
 
       # 3. Run Dependency Scan on all projects
       - name: Snyk Open Source test
-        run: snyk test --all-projects --exclude=android,docs --sarif-file-output=snyk-deps.sarif || true
+        run: snyk test --all-projects --exclude=android,docs --strict-out-of-sync=false --sarif-file-output=snyk-deps.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
