@@ -35,20 +35,36 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # 3. Run Dependency Scan (SCA)
-      # --sarif-file-output: Generates the format GitHub needs
-      # --all-projects: Finds all manifest files (npm, pip, etc.)
-      # --exclude=android: Skip android gradle projects
-      # || true: Prevents the job from failing so the upload step can run
+      # 3. Scan main customer-facing packages (under 20 limit)
       - name: Snyk Open Source test
-        run: snyk test --all-projects --exclude=android --sarif-file-output=snyk-deps.sarif || true
+        run: |
+          snyk test \
+            --file=package.json \
+            --file=packages/amazon-cognito-identity-js/package.json \
+            --file=packages/analytics/package.json \
+            --file=packages/api/package.json \
+            --file=packages/api-graphql/package.json \
+            --file=packages/api-rest/package.json \
+            --file=packages/auth/package.json \
+            --file=packages/aws-amplify/package.json \
+            --file=packages/aws-amplify-react-native/package.json \
+            --file=packages/cache/package.json \
+            --file=packages/core/package.json \
+            --file=packages/datastore/package.json \
+            --file=packages/datastore-storage-adapter/package.json \
+            --file=packages/geo/package.json \
+            --file=packages/interactions/package.json \
+            --file=packages/notifications/package.json \
+            --file=packages/predictions/package.json \
+            --file=packages/pubsub/package.json \
+            --file=packages/pushnotification/package.json \
+            --file=packages/storage/package.json \
+            --sarif-file-output=snyk-deps.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # 3. Upload Results to GitHub Security Tab
-      - name: Upload Snyk Dependency results
+      # 4. Upload Results to GitHub Security Tab
+      - name: Upload Snyk results to GitHub
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-deps.sarif
-          # Removing 'category: snyk-dependencies' allows GitHub to
-          # handle multiple project runs within the same file.
