@@ -39,7 +39,8 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-deps.sarif
-          category: snyk-dependencies
+          # Removing 'category: snyk-dependencies' allows GitHub to
+          # handle multiple project runs within the same file.
 
       # 4. Push snapshot to Snyk Dashboard (for continuous monitoring)
       - name: Snyk Open Source monitor
