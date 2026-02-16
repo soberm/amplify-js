@@ -55,11 +55,14 @@ jobs:
                 version: .version,
                 "$schema": ."$schema",
                 runs: [
-                  {
+                  ({
                     tool: .runs[0].tool,
-                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri),
-                    originalUriBaseIds: .runs[0].originalUriBaseIds
-                  }
+                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri)
+                  } + (
+                    [.runs[].originalUriBaseIds] | 
+                    map(select(. != null)) | 
+                    if length > 0 then {originalUriBaseIds: .[0]} else {} end
+                  ))
                 ]
               }' snyk-deps.sarif > snyk-merged.sarif
               
