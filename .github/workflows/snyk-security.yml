@@ -57,7 +57,8 @@ jobs:
                 runs: [
                   ({
                     tool: .runs[0].tool,
-                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri)
+                    results: [.runs[].results[]] | unique_by(.ruleId + .locations[0].physicalLocation.artifactLocation.uri),
+                    properties: (.runs[0].properties // {})
                   } + (
                     [.runs[].originalUriBaseIds] | 
                     map(select(. != null)) | 
