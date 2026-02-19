@@ -54,6 +54,36 @@ jobs:
           echo "Audit complete. Processing results..."
         continue-on-error: true
 
+      - name: Deduplicate vulnerabilities
+        run: |
+          echo "=== Deduplicating vulnerabilities ==="
+          
+          # Extract unique vulnerabilities by advisory ID and severity
+          jq -r '
+            select(.type == "auditAdvisory") |
+            .data.advisory |
+            "\(.severity)|\(.id)|\(.title)|\(.module_name)|\(.url)"
+          ' audit-output.json 2>/dev/null | sort -u > unique-vulnerabilities.txt || echo "No vulnerabilities found"
+          
+          # Count by severity
+          echo ""
+          echo "=== Vulnerability Summary ==="
+          echo "Critical: $(grep -c "^critical|" unique-vulnerabilities.txt 2>/dev/null || echo 0)"
+          echo "High: $(grep -c "^high|" unique-vulnerabilities.txt 2>/dev/null || echo 0)"
+          echo "Moderate: $(grep -c "^moderate|" unique-vulnerabilities.txt 2>/dev/null || echo 0)"
+          echo "Low: $(grep -c "^low|" unique-vulnerabilities.txt 2>/dev/null || echo 0)"
+          echo "Total unique: $(wc -l < unique-vulnerabilities.txt 2>/dev/null || echo 0)"
+          echo ""
+          
+          # Format for display
+          echo "=== Unique Vulnerabilities ===" > deduplicated-audit.txt
+          awk -F'|' '{
+            printf "\n[%s] %s\n", toupper($1), $3
+            printf "  Package: %s\n", $4
+            printf "  Advisory: %s\n", $5
+          }' unique-vulnerabilities.txt >> deduplicated-audit.txt 2>/dev/null || true
+        continue-on-error: true
+
       - name: Setup TypeScript for converter
         run: |
           cd scripts/security-audit
@@ -76,6 +106,6 @@ jobs:
         if: always()
         run: |
           echo "=== Yarn Audit Summary for ${{ matrix.branch }} ==="
-          cat audit-summary.txt || echo "No audit summary available"
+          cat deduplicated-audit.txt || cat audit-summary.txt || echo "No audit summary available"
           echo ""
           echo "SARIF report uploaded to GitHub Code Scanning"
