@@ -203,38 +203,36 @@ function convertToSarif(auditLines: string[]): SarifLog {
       },
     });
 
-    // Create SARIF result for each finding
-    for (const finding of advisory.findings || []) {
-      // Use resolution paths if available, otherwise use finding paths
-      const paths =
-        resolutions.get(advisory.id) ||
-        finding.paths ||
-        [`${advisory.module_name}@${finding.version}`];
-
-      for (const depPath of paths) {
-        results.push({
-          ruleId,
-          level,
-          message: {
-            text: `${advisory.module_name}@${finding.version} has a ${advisory.severity} severity vulnerability: ${advisory.title}`,
-          },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: {
-                  uri: 'package.json',
-                },
-                region: {
-                  startLine: 1,
-                },
+    // Create a single SARIF result per advisory (deduplicated)
+    // Instead of one result per dependency path, we create one result per unique advisory
+    const findings = advisory.findings || [];
+    if (findings.length > 0) {
+      // Get all affected versions
+      const versions = [...new Set(findings.map(f => f.version))];
+      const versionText = versions.length === 1 ? versions[0] : `${versions.length} versions`;
+      
+      results.push({
+        ruleId,
+        level,
+        message: {
+          text: `${advisory.module_name}@${versionText} has a ${advisory.severity} severity vulnerability: ${advisory.title}`,
+        },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: {
+                uri: 'package.json',
+              },
+              region: {
+                startLine: 1,
               },
             },
-          ],
-        });
-      }
+          },
+        ],
+      });
     }
 
-    // If no findings, create at least one result for the advisory
+    // If no findings, create one result for the advisory
     if (!advisory.findings || advisory.findings.length === 0) {
       results.push({
         ruleId,
