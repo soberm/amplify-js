@@ -1,137 +1,186 @@
 #!/usr/bin/env node
+/* eslint-disable no-console */
 
 /**
  * Parses yarn audit output and creates per-package PRs for patchable vulnerabilities.
- * Replaces create-patch-prs.sh with a portable TypeScript implementation.
  *
- * Required env: GH_TOKEN, BASE_BRANCH
- * Optional env: GITHUB_USER, GITHUB_EMAIL
+ * Required env: GH_TOKEN (set by GitHub Actions)
+ * Optional env: BASE_BRANCH, GITHUB_USER, GITHUB_EMAIL, GITHUB_WORKSPACE
  */
 
 import * as fs from 'fs';
+import * as path from 'path';
 import { execSync } from 'child_process';
 
+// ── types ────────────────────────────────────────────────────────────────────
+
 interface YarnV1AuditAdvisory {
-  id: number;
-  title: string;
-  module_name: string;
-  severity: 'info' | 'low' | 'moderate' | 'high' | 'critical';
-  url: string;
-  overview: string;
-  recommendation: string;
-  vulnerable_versions: string;
-  patched_versions: string;
-  findings: Array<{ version: string; paths: string[] }>;
+	id: number;
+	title: string;
+	module_name: string;
+	severity: 'info' | 'low' | 'moderate' | 'high' | 'critical';
+	url: string;
+	overview: string;
+	recommendation: string;
+	vulnerable_versions: string;
+	patched_versions: string;
+	findings: { version: string; paths: string[] }[];
 }
 
 interface YarnV1AuditLine {
-  type: string;
-  data: {
-    advisory?: YarnV1AuditAdvisory;
-  };
+	type: string;
+	data: {
+		advisory?: YarnV1AuditAdvisory;
+	};
 }
 
 interface PackageInfo {
-  patchedVersion: string;
-  vulns: string[];
+	patchedVersion: string;
+	vulns: { severity: string; title: string; url: string }[];
 }
 
-function run(cmd: string, opts?: { cwd?: string; ignoreError?: boolean }): string {
-  try {
-    return execSync(cmd, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: opts?.cwd,
-    }).trim();
-  } catch (err: any) {
-    if (opts?.ignoreError) return err.stdout?.trim() ?? '';
-    throw err;
-  }
-}
+// ── helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Parse NDJSON audit output, extract patchable advisories, group by package.
- */
-function parsePatchableVulnerabilities(auditFile: string): Map<string, PackageInfo> {
-  const raw = fs.readFileSync(auditFile, 'utf-8');
-  const packages = new Map<string, PackageInfo>();
+const DRY_RUN = process.argv.includes('--dry-run');
 
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
+const repoRoot =
+	process.env.GITHUB_WORKSPACE || path.resolve(__dirname, '..', '..');
 
-    let parsed: YarnV1AuditLine;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue; // skip non-JSON lines (yarn v1 can mix stderr)
-    }
+function run(cmd: string, opts?: { ignoreError?: boolean }): string {
+	console.log(`  $ ${cmd}`);
+	if (DRY_RUN) {
+		console.log('    [dry-run] skipped');
 
-    if (parsed.type !== 'auditAdvisory' || !parsed.data.advisory) continue;
+		return '';
+	}
+	try {
+		return execSync(cmd, {
+			encoding: 'utf-8',
+			stdio: ['pipe', 'pipe', 'pipe'],
+			cwd: repoRoot,
+		}).trim();
+	} catch (err: any) {
+		if (opts?.ignoreError) {
+			// gh cli writes URLs to stdout, status messages to stderr
+			const out = (err.stdout?.trim() || err.stderr?.trim()) ?? '';
 
-    const adv = parsed.data.advisory;
-    if (
-      adv.patched_versions === '<0.0.0' ||
-      adv.patched_versions === 'No patch available'
-    ) {
-      continue;
-    }
-
-    const pkg = adv.module_name;
-    const existing = packages.get(pkg);
-
-    const vulnLine = `- **${adv.severity}**: ${adv.title}`;
-
-    if (!existing) {
-      packages.set(pkg, {
-        patchedVersion: adv.patched_versions,
-        vulns: [vulnLine],
-      });
-    } else {
-      // Keep highest patched version (simple string compare works for semver ranges)
-      if (adv.patched_versions > existing.patchedVersion) {
-        existing.patchedVersion = adv.patched_versions;
-      }
-      // Dedupe identical vuln lines but keep different ones
-      if (!existing.vulns.includes(vulnLine)) {
-        existing.vulns.push(vulnLine);
-      }
-    }
-  }
-
-  return packages;
+			return out;
+		}
+		throw err;
+	}
 }
 
 /**
- * Extract a concrete version number from a patched_versions range like ">=7.5.8"
+ * Extract a concrete version from a patched_versions range like ">=7.5.8"
+ * Falls back to the raw range if no version can be extracted.
  */
-function extractVersion(patchedVersions: string): string | null {
-  const match = patchedVersions.match(/(\d+\.\d+\.\d+)/);
-  return match ? match[1] : null;
+function resolveVersion(patchedVersions: string): string {
+	const match = patchedVersions.match(/(\d+\.\d+\.\d+)/);
+
+	return match ? match[1] : patchedVersions;
 }
 
-function safeBranchName(pkg: string): string {
-  return pkg.replace(/[\/@]/g, '-').replace(/^-/, '');
+/** Detect owner/repo from GITHUB_REPOSITORY or git remote */
+function detectRepo(): string {
+	if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
+	try {
+		const url = execSync('git remote get-url origin', {
+			encoding: 'utf-8',
+			cwd: repoRoot,
+		}).trim();
+		// ssh: git@github.com:owner/repo.git  or  https://github.com/owner/repo.git
+		const match = url.match(/github\.com[:/](.+?)(?:\.git)?$/);
+
+		return match ? match[1] : '';
+	} catch {
+		return '';
+	}
 }
 
-function buildPrBody(pkg: string, patchedVersion: string, vulns: string[], baseBranch: string): string {
-  return `#### Description of changes
+// ── parse audit output ──────────────────────────────────────────────────────
+
+function parsePatchableVulnerabilities(
+	auditFile: string,
+): Map<string, PackageInfo> {
+	const raw = fs.readFileSync(auditFile, 'utf-8');
+	const packages = new Map<string, PackageInfo>();
+
+	for (const line of raw.split('\n')) {
+		if (!line.trim()) continue;
+
+		let parsed: YarnV1AuditLine;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+
+		if (parsed.type !== 'auditAdvisory' || !parsed.data.advisory) continue;
+
+		const adv = parsed.data.advisory;
+		if (
+			!adv.patched_versions ||
+			adv.patched_versions === '<0.0.0' ||
+			/no\s+patch/i.test(adv.patched_versions)
+		) {
+			continue;
+		}
+
+		const vuln = { severity: adv.severity, title: adv.title, url: adv.url };
+		const existing = packages.get(adv.module_name);
+
+		if (!existing) {
+			packages.set(adv.module_name, {
+				patchedVersion: adv.patched_versions,
+				vulns: [vuln],
+			});
+		} else {
+			if (adv.patched_versions > existing.patchedVersion) {
+				existing.patchedVersion = adv.patched_versions;
+			}
+			const key = `${vuln.severity}:${vuln.title}`;
+			if (!existing.vulns.some(v => `${v.severity}:${v.title}` === key)) {
+				existing.vulns.push(vuln);
+			}
+		}
+	}
+
+	return packages;
+}
+
+// ── PR body ─────────────────────────────────────────────────────────────────
+
+function buildPrBody(
+	pkg: string,
+	info: PackageInfo,
+	baseBranch: string,
+): string {
+	const rows = info.vulns
+		.map(
+			v =>
+				`| ${v.severity} | ${v.title} | \`${info.patchedVersion}\` | ${v.url} |`,
+		)
+		.join('\n');
+
+	return `#### Description of changes
 
 Automated security patch for \`${pkg}\` to address known vulnerabilities.
 
-**Patched version:** \`${patchedVersion}\`
+### Vulnerabilities addressed
 
-**Vulnerabilities fixed:**
-${vulns.join('\n')}
+| Severity | Title | Patched | Advisory |
+|----------|-------|---------|----------|
+${rows}
 
 #### Issue #, if available
 
-Security audit findings in ${baseBranch}
+Security audit findings on \`${baseBranch}\`
 
 #### Description of how you validated changes
 
 - Semver-compatible upgrade attempted first via \`yarn upgrade\`
 - Falls back to \`resolutions\` for transitive dependencies
-- Only the targeted package is changed per PR
+- Lockfile diff should be reviewed before merging
 
 #### Checklist
 
@@ -144,132 +193,147 @@ By submitting this pull request, I confirm that my contribution is made under th
 `;
 }
 
-function main() {
-  const baseBranch = process.env.BASE_BRANCH || 'main';
-  const gitUser = process.env.GITHUB_USER || 'github-actions[bot]';
-  const gitEmail = process.env.GITHUB_EMAIL || 'github-actions[bot]@users.noreply.github.com';
+// ── branch name helper ──────────────────────────────────────────────────────
 
-  console.log('=== Security Patch PR Creator ===');
-  console.log(`Base branch: ${baseBranch}`);
-  console.log('');
-  console.log('Analyzing vulnerabilities with available patches...');
+function safeBranchName(baseBranch: string, pkg: string): string {
+	const safePkg = pkg.replace(/[/@]/g, '-').replace(/^-/, '');
 
-  const auditFile = 'audit-output.json';
-  if (!fs.existsSync(auditFile)) {
-    console.log('audit-output.json not found.');
-    process.exit(0);
-  }
+	return `security-patch/${baseBranch}/${safePkg}`;
+}
 
-  const packages = parsePatchableVulnerabilities(auditFile);
+// ── main ────────────────────────────────────────────────────────────────────
 
-  if (packages.size === 0) {
-    console.log('No patchable vulnerabilities found.');
-    process.exit(0);
-  }
+function main(): void {
+	const baseBranch = process.env.BASE_BRANCH || 'main';
+	const gitUser = process.env.GITHUB_USER || 'github-actions[bot]';
+	const gitEmail =
+		process.env.GITHUB_EMAIL || 'github-actions[bot]@users.noreply.github.com';
 
-  console.log(`Found ${packages.size} packages with available patches:`);
-  for (const [pkg, info] of packages) {
-    console.log(`  - ${pkg} (needs ${info.patchedVersion})`);
-  }
+	const ghRepo = detectRepo();
 
-  // Configure git
-  run(`git config user.name "${gitUser}"`);
-  run(`git config user.email "${gitEmail}"`);
+	console.log('=== Security Patch PR Creator ===');
+	console.log(`Repo root:    ${repoRoot}`);
+	console.log(`Base branch:  ${baseBranch}`);
+	console.log(`GitHub repo:  ${ghRepo || '(auto-detect)'}`);
+	if (DRY_RUN) console.log('Mode:         DRY RUN');
+	console.log();
 
-  let createdPrs = 0;
+	const auditFile = path.join(repoRoot, 'audit-output.json');
+	if (!fs.existsSync(auditFile)) {
+		console.log(`audit-output.json not found at ${auditFile}. Nothing to do.`);
 
-  for (const [pkg, info] of packages) {
-    const safeName = safeBranchName(pkg);
-    const branchName = `security-patch/${safeName}`;
+		return;
+	}
 
-    console.log('');
-    console.log(`--- Processing ${pkg} ---`);
+	const packages = parsePatchableVulnerabilities(auditFile);
+	if (packages.size === 0) {
+		console.log('No patchable vulnerabilities found.');
 
-    // Check for existing open PR
-    const existingPr = run(
-      `gh pr list --search "chore(deps): patch ${pkg} security" --state open --json number --jq ".[0].number"`,
-      { ignoreError: true }
-    );
-    if (existingPr) {
-      console.log(`  Open PR #${existingPr} already exists for ${pkg}, skipping.`);
-      continue;
-    }
+		return;
+	}
 
-    // Check if remote branch already exists
-    const remoteBranch = run(
-      `git ls-remote --heads origin ${branchName}`,
-      { ignoreError: true }
-    );
-    if (remoteBranch.includes(branchName)) {
-      console.log(`  Branch ${branchName} already exists remotely, skipping.`);
-      continue;
-    }
+	console.log(`Found ${packages.size} package(s) with available patches:`);
+	for (const [pkg, info] of packages) {
+		console.log(
+			`  - ${pkg} → ${info.patchedVersion} (${info.vulns.length} vuln(s))`,
+		);
+	}
+	console.log();
 
-    // Reset working tree to base branch state
-    run(`git checkout ${baseBranch} -- yarn.lock package.json`, { ignoreError: true });
-    run('git checkout -- .', { ignoreError: true });
+	if (!DRY_RUN) {
+		run(`git config user.name "${gitUser}"`);
+		run(`git config user.email "${gitEmail}"`);
+	}
 
-    // Try 1: yarn upgrade
-    console.log(`  Attempting yarn upgrade ${pkg}...`);
-    run(`yarn upgrade ${pkg}`, { ignoreError: true });
+	let created = 0;
 
-    // Check if yarn.lock changed
-    const yarnLockChanged = run('git diff --name-only yarn.lock', { ignoreError: true });
+	const repoFlag = ghRepo ? ` --repo ${ghRepo}` : '';
 
-    if (!yarnLockChanged) {
-      // Try 2: Add resolution in package.json
-      console.log('  Direct upgrade had no effect, adding resolution...');
-      const resolvedVersion = extractVersion(info.patchedVersion);
-      if (!resolvedVersion) {
-        console.log(`  Could not parse version from ${info.patchedVersion}, skipping.`);
-        continue;
-      }
+	for (const [pkg, info] of packages) {
+		const branchName = safeBranchName(baseBranch, pkg);
+		console.log(`--- ${pkg} ---`);
 
-      const pkgJson = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-      pkgJson.resolutions = pkgJson.resolutions || {};
-      pkgJson.resolutions[pkg] = resolvedVersion;
-      fs.writeFileSync('package.json', JSON.stringify(pkgJson, null, 2) + '\n');
+		// Skip if an open PR already exists
+		const existingPr = run(
+			`gh pr list --head "${branchName}" --state open --json number --jq ".[0].number"${repoFlag}`,
+			{ ignoreError: true },
+		);
+		if (existingPr) {
+			console.log(`  PR #${existingPr} already open, skipping.\n`);
+			continue;
+		}
 
-      run('yarn install', { ignoreError: true });
-    }
+		// Ensure we start from a clean base
+		run(`git checkout ${baseBranch}`, { ignoreError: true });
+		run(`git checkout -B ${branchName}`);
 
-    // Check if anything changed
-    const changes = run('git diff --name-only yarn.lock package.json', { ignoreError: true });
-    if (!changes) {
-      console.log(`  No changes for ${pkg}, skipping.`);
-      continue;
-    }
+		// Attempt 1: direct upgrade
+		console.log(`  Trying yarn upgrade ${pkg}...`);
+		run(`yarn upgrade ${pkg}`, { ignoreError: true });
 
-    // Create branch, commit, push
-    run(`git checkout -b ${branchName}`);
-    run('git add yarn.lock package.json');
-    run(`git commit -m "chore(deps): patch ${pkg} to fix security vulnerabilities"`);
-    run(`git push origin ${branchName}`);
+		const lockChanged = run('git diff --name-only yarn.lock', {
+			ignoreError: true,
+		});
 
-    // Create PR
-    const prBody = buildPrBody(pkg, info.patchedVersion, info.vulns, baseBranch);
-    const prBodyFile = 'pr-body.md';
-    fs.writeFileSync(prBodyFile, prBody);
+		if (!lockChanged && !DRY_RUN) {
+			// Attempt 2: add a resolution entry
+			console.log('  Direct upgrade had no effect, adding resolution...');
+			const pkgJsonPath = path.join(repoRoot, 'package.json');
+			const rawPkgJson = fs.readFileSync(pkgJsonPath, 'utf-8');
+			const indent = rawPkgJson.match(/^(\t| +)/m)?.[1] ?? '\t';
+			const pkgJson = JSON.parse(rawPkgJson);
+			pkgJson.resolutions = pkgJson.resolutions || {};
+			pkgJson.resolutions[pkg] = resolveVersion(info.patchedVersion);
+			fs.writeFileSync(
+				pkgJsonPath,
+				JSON.stringify(pkgJson, null, indent) + '\n',
+			);
+			run('yarn install', { ignoreError: true });
+		}
 
-    const prResult = run(
-      `gh pr create --title "chore(deps): patch ${pkg} security vulnerabilities" --body-file ${prBodyFile} --label "dependencies,security" --base ${baseBranch}`,
-      { ignoreError: true }
-    );
-    if (prResult) {
-      console.log(`  ✅ PR created: ${prResult}`);
-      createdPrs++;
-    } else {
-      console.log(`  Failed to create PR for ${pkg}`);
-    }
+		// Check if anything actually changed
+		const changes = run('git diff --name-only', { ignoreError: true });
+		if (!DRY_RUN && !changes) {
+			console.log(`  No changes produced for ${pkg}, skipping.\n`);
+			run(`git checkout ${baseBranch}`, { ignoreError: true });
+			continue;
+		}
 
-    // Return to base branch for next package
-    run(`git checkout ${baseBranch}`);
-  }
+		// Commit and push
+		run('git add package.json yarn.lock');
+		run(`git commit -m "chore(deps): patch ${pkg} security vulnerabilities"`, {
+			ignoreError: true,
+		});
+		run(`git push origin ${branchName} --force`, { ignoreError: true });
 
-  console.log('');
-  console.log('=== Summary ===');
-  console.log(`Packages analyzed: ${packages.size}`);
-  console.log(`PRs created: ${createdPrs}`);
+		// Create PR using a temp file for the body (avoids shell escaping issues)
+		const body = buildPrBody(pkg, info, baseBranch);
+		const title = `chore(deps): patch ${pkg} security vulnerabilities (${baseBranch})`;
+
+		if (DRY_RUN) {
+			console.log(`  Would create PR: ${title}`);
+			console.log(`  Branch: ${branchName} → ${baseBranch}\n`);
+		} else {
+			const bodyFile = path.join(repoRoot, '.pr-body-tmp.md');
+			fs.writeFileSync(bodyFile, body);
+			const prUrl = run(
+				`gh pr create --title "${title}" --body-file .pr-body-tmp.md --base ${baseBranch} --head ${branchName}${repoFlag}`,
+				{ ignoreError: true },
+			);
+			fs.unlinkSync(bodyFile);
+			if (prUrl) {
+				console.log(`  PR created: ${prUrl}\n`);
+				created++;
+			} else {
+				console.log(`  Failed to create PR for ${pkg}.\n`);
+			}
+		}
+
+		// Return to base for next iteration
+		run(`git checkout ${baseBranch}`, { ignoreError: true });
+	}
+
+	console.log(`Done. Created ${created} PR(s).`);
 }
 
 main();

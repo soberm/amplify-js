@@ -5,37 +5,24 @@ on:
     branches:
       - ci/dependency-review
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to audit (e.g., v5-stable, v4-stable)'
-        required: false
-        default: 'v5-stable'
 
 permissions:
   contents: write
   security-events: write
   pull-requests: write
-  actions: write
 
 concurrency:
   group: security-audit-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  audit-lts-branches:
-    name: Audit ${{ matrix.branch }}
+  security-audit:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        branch:
-          - ci/dependency-review
-    
     steps:
-      - name: Checkout ${{ matrix.branch }}
+      - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          ref: ${{ github.event.inputs.branch || matrix.branch }}
+          ref: ci/dependency-review
           persist-credentials: true
 
       - name: Setup Node.js
@@ -46,56 +33,44 @@ jobs:
 
       - name: Install dependencies
         run: yarn install --frozen-lockfile || yarn install
-        continue-on-error: true
 
-      - name: Run Yarn Audit
-        id: audit
-        run: |
-          echo "Running yarn audit for ${{ matrix.branch }}..."
-          yarn audit --json > audit-output.json 2>&1 || true
-          echo "Audit complete. Processing results..."
-        continue-on-error: true
+      - name: Run yarn audit
+        run: yarn audit --json > audit-output.json 2>&1 || true
 
-      - name: Setup TypeScript for converter
+      - name: Install audit tooling
         run: |
           cd scripts/security-audit
           yarn install --frozen-lockfile || yarn install
-        continue-on-error: true
 
       - name: Convert audit to SARIF
         run: |
-          yarn --cwd scripts/security-audit ts-node audit-to-sarif.ts ../../audit-output.json ../../audit-results.sarif
-        continue-on-error: true
+          yarn --cwd scripts/security-audit ts-node audit-to-sarif.ts \
+            ../../audit-output.json ../../audit-results.sarif
 
       - name: Upload SARIF to GitHub Security
+        if: always()
         uses: github/codeql-action/upload-sarif@6c089f53dd51dc3fc7e599c3cb5356453a52ca9e # v2
         with:
           sarif_file: audit-results.sarif
-          category: security-audit-${{ matrix.branch }}
-        continue-on-error: true
+          category: yarn-audit
 
-      - name: Create patch fix PRs
+      - name: Create patch PRs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EMAIL: ${{ vars.GH_EMAIL }}
-          GITHUB_USER: ${{ vars.GH_USER }}
-          BASE_BRANCH: ${{ github.event.inputs.branch || matrix.branch }}
+          BASE_BRANCH: ci/dependency-review
         run: |
+          git config user.email "${{ vars.GH_EMAIL || 'github-actions[bot]@users.noreply.github.com' }}"
+          git config user.name "${{ vars.GH_USER || 'github-actions[bot]' }}"
           yarn --cwd scripts/security-audit ts-node create-patch-prs.ts
-        continue-on-error: true
 
-      - name: Display Audit Summary
+      - name: Audit summary
         if: always()
         run: |
-          echo "=== Yarn Audit Summary for ${{ matrix.branch }} ==="
-          
-          # Show summary from SARIF converter output
+          echo "=== Audit Summary ==="
           if [ -f audit-results.sarif ]; then
-            echo "Vulnerabilities found:"
-            jq -r '.runs[0].results[] | "  [\(.level | ascii_upcase)] \(.message.text)"' audit-results.sarif 2>/dev/null || echo "Unable to parse SARIF"
+            TOTAL=$(jq '.runs[0].results | length' audit-results.sarif 2>/dev/null || echo 0)
+            echo "Vulnerabilities found: $TOTAL"
+            jq -r '.runs[0].results[] | "  [\(.level)] \(.message.text)"' audit-results.sarif 2>/dev/null || true
           else
             echo "No SARIF results available"
           fi
-          
-          echo ""
-          echo "SARIF report uploaded to GitHub Code Scanning"
