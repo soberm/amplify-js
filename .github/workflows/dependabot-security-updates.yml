@@ -12,7 +12,7 @@ on:
       branch:
         description: 'Branch to run security updates against'
         required: false
-        default: 'main'
+        default: 'v5-stable'
 
 permissions: {}
 
@@ -29,10 +29,15 @@ jobs:
       contents: read
       actions: write
     steps:
-      - name: Checkout
+      - name: Checkout workflow scripts
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          ref: v5-stable
+          path: workflow
+
+      - name: Checkout target branch
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ inputs.branch || 'v5-stable' }}
           path: repo
 
       - name: Download Dependabot CLI
@@ -48,7 +53,7 @@ jobs:
           LOCAL_GITHUB_ACCESS_TOKEN: ${{ github.token }}
         run: |
           ./dependabot update \
-            -f repo/scripts/dependabot-security-updates/job.yml \
+            -f workflow/scripts/dependabot-security-updates/job.yml \
             --local repo \
             --timeout 30m \
             > result.jsonl 2>/dev/null || true
@@ -69,8 +74,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-        with:
-          ref: v5-stable
 
       - name: Download result
         id: download
@@ -83,7 +86,7 @@ jobs:
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_BRANCH: v5-stable
+          BASE_BRANCH: ${{ inputs.branch || 'v5-stable' }}
           GIT_USER: ${{ vars.GH_USER || 'github-actions[bot]' }}
           GIT_EMAIL: ${{ vars.GH_EMAIL || 'github-actions[bot]@users.noreply.github.com' }}
         run: bash scripts/dependabot-security-updates/create-prs.sh result.jsonl
