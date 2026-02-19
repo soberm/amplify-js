@@ -174,7 +174,7 @@ function convertToSarif(auditLines: string[]): SarifLog {
   const results: SarifResult[] = [];
 
   // Convert each advisory to SARIF rule and result
-  for (const [advisoryId, advisory] of Object.entries(advisories)) {
+  for (const [, advisory] of Object.entries(advisories)) {
     const ruleId = `npm-audit/${advisory.id}`;
     const level = mapSeverityToLevel(advisory.severity);
     const securitySeverity = mapSeverityToScore(advisory.severity);

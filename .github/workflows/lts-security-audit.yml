@@ -12,8 +12,14 @@ on:
         default: 'v5-stable'
 
 permissions:
-  contents: read
+  contents: write
   security-events: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   audit-lts-branches:
@@ -30,7 +36,7 @@ jobs:
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           ref: ${{ github.event.inputs.branch || matrix.branch }}
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Setup Node.js
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
@@ -68,3 +74,28 @@ jobs:
           category: security-audit-${{ matrix.branch }}
         continue-on-error: true
 
+      - name: Create patch fix PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EMAIL: ${{ vars.GH_EMAIL }}
+          GITHUB_USER: ${{ vars.GH_USER }}
+          BASE_BRANCH: ${{ github.event.inputs.branch || matrix.branch }}
+        run: |
+          yarn --cwd scripts/security-audit ts-node create-patch-prs.ts
+        continue-on-error: true
+
+      - name: Display Audit Summary
+        if: always()
+        run: |
+          echo "=== Yarn Audit Summary for ${{ matrix.branch }} ==="
+          
+          # Show summary from SARIF converter output
+          if [ -f audit-results.sarif ]; then
+            echo "Vulnerabilities found:"
+            jq -r '.runs[0].results[] | "  [\(.level | ascii_upcase)] \(.message.text)"' audit-results.sarif 2>/dev/null || echo "Unable to parse SARIF"
+          else
+            echo "No SARIF results available"
+          fi
+          
+          echo ""
+          echo "SARIF report uploaded to GitHub Code Scanning"
