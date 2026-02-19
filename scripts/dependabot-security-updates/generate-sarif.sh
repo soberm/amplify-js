@@ -79,12 +79,18 @@ while [ "$OFFSET" -lt "$DEP_COUNT" ]; do
   # Paginate through results for this batch
   PAGE=1
   while true; do
-    RESPONSE=$(gh api "/advisories" \
+    RESPONSE=$(gh api --method GET "/advisories" \
       -f ecosystem=npm \
       -f "affects=${AFFECTS}" \
-      -f per_page=100 \
-      -f "page=${PAGE}" \
+      -F per_page=100 \
+      -F "page=${PAGE}" \
       --header "X-GitHub-Api-Version: 2022-11-28" 2>/dev/null || echo "[]")
+
+    # Validate response is an array (API errors return objects)
+    if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "  Warning: unexpected API response, skipping batch."
+      break
+    fi
 
     COUNT=$(echo "$RESPONSE" | jq 'length')
     if [ "$COUNT" -eq 0 ]; then
