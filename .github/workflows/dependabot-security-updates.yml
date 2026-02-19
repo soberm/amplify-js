@@ -12,7 +12,7 @@ on:
       branch:
         description: 'Branch to run security updates against'
         required: false
-        default: 'test/sarif-provenance'
+        default: 'test/sarif-provenance-2'
 
 permissions: {}
 
@@ -37,7 +37,7 @@ jobs:
       - name: Checkout target branch
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          ref: ${{ inputs.branch || 'test/sarif-provenance' }}
+          ref: ${{ inputs.branch || 'test/sarif-provenance-2' }}
           path: repo
 
       - name: Download Dependabot CLI
@@ -91,7 +91,7 @@ jobs:
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_BRANCH: ${{ inputs.branch || 'test/sarif-provenance' }}
+          BASE_BRANCH: ${{ inputs.branch || 'test/sarif-provenance-2' }}
           GIT_USER: ${{ vars.GH_USER || 'github-actions[bot]' }}
           GIT_EMAIL: ${{ vars.GH_EMAIL || 'github-actions[bot]@users.noreply.github.com' }}
         run: npx tsx src/create-prs.ts ../../result.jsonl
@@ -121,7 +121,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          BRANCH="${{ inputs.branch || 'test/sarif-provenance' }}"
+          BRANCH="${{ inputs.branch || 'test/sarif-provenance-2' }}"
           SHA=$(gh api "repos/${{ github.repository }}/git/ref/heads/${BRANCH}" --jq '.object.sha')
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
