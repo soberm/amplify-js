@@ -186,7 +186,7 @@ async function main(): Promise<void> {
 
     // Apply file changes
     for (const file of data["updated-dependency-files"]) {
-      const filePath = (file.directory + "/" + file.name).replace(/^\//, "");
+      const filePath = (file.directory + "/" + file.name).replace(/^\/+/, "");
 
       if (file.deleted) {
         git(`git rm -f "${filePath}"`, { ignoreError: true });

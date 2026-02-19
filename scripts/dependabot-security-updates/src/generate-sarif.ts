@@ -151,8 +151,7 @@ function isVersionAffected(version: string, range: string | null): boolean {
 /** Extract unique dependencies from Dependabot CLI JSONL output. */
 function extractDeps(jsonlPath: string): Dependency[] {
   const content = readFileSync(jsonlPath, "utf8");
-  const seen = new Set<string>();
-  const deps: Dependency[] = [];
+  const deps = new Map<string, Dependency>();
 
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
@@ -165,13 +164,10 @@ function extractDeps(jsonlPath: string): Dependency[] {
     if (event.type !== "update_dependency_list") continue;
     for (const dep of event.data.dependencies) {
       if (!dep.version) continue;
-      const key = `${dep.name}@${dep.version}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      deps.push({ name: dep.name, version: dep.version });
+      deps.set(`${dep.name}@${dep.version}`, dep);
     }
   }
-  return deps;
+  return [...deps.values()];
 }
 
 /** Query GitHub Advisory Database for advisories affecting our deps. */
@@ -179,7 +175,7 @@ async function fetchAdvisories(
   octokit: Octokit,
   deps: Dependency[]
 ): Promise<Advisory[]> {
-  const allAdvisories: Advisory[] = [];
+  const advisoryMap = new Map<string, Advisory>();
 
   for (let offset = 0; offset < deps.length; offset += BATCH_SIZE) {
     const batch = deps.slice(offset, offset + BATCH_SIZE);
@@ -193,7 +189,9 @@ async function fetchAdvisories(
         octokit.securityAdvisories.listGlobalAdvisories,
         { ecosystem: "npm", affects, per_page: 100 }
       ) as Advisory[];
-      allAdvisories.push(...advisories);
+      for (const a of advisories) {
+        advisoryMap.set(a.ghsa_id, a);
+      }
     } catch (err) {
       console.log(
         `  Warning: API request failed, skipping batch.`,
@@ -202,13 +200,7 @@ async function fetchAdvisories(
     }
   }
 
-  // Deduplicate by ghsa_id
-  const seen = new Set<string>();
-  return allAdvisories.filter((a) => {
-    if (seen.has(a.ghsa_id)) return false;
-    seen.add(a.ghsa_id);
-    return true;
-  });
+  return [...advisoryMap.values()];
 }
 
 /** Filter advisories to only include vulnerabilities that actually affect our versions. */
