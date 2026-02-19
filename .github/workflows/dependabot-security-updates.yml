@@ -27,6 +27,7 @@ jobs:
       # Read-only: Dependabot CLI may execute arbitrary code from package
       # manifests, so it must not have write access.
       contents: read
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
