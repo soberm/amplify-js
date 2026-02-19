@@ -1,6 +1,9 @@
 name: Dependabot Security Updates
 
 on:
+  push:
+    branches:
+      - ci/dependabot-security-updates  # TEMP: remove after testing
   schedule:
     # Run daily at 2 AM UTC
     - cron: '0 2 * * *'
