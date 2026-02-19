@@ -1,0 +1,20 @@
+# Dependabot CLI job definition for security-only updates.
+# The CLI consults the GitHub Advisory Database internally and only proposes
+# updates for dependencies with known vulnerabilities.
+#
+# Docs: https://github.com/dependabot/cli
+
+job:
+  package-manager: npm_and_yarn
+  allowed-updates:
+    - update-type: security
+  security-updates-only: true
+  source:
+    provider: github
+    repo: aws-amplify/amplify-js
+    directory: /
+credentials:
+  - type: git_source
+    host: github.com
+    username: x-access-token
+    password: $LOCAL_GITHUB_ACCESS_TOKEN
