@@ -138,7 +138,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: security-report.sarif
-          category: dependabot-security-audit
+          category: dependabot-security-audit/${{ steps.target-ref.outputs.branch }}
           ref: refs/heads/${{ steps.target-ref.outputs.branch }}
           sha: ${{ steps.target-ref.outputs.sha }}
 
