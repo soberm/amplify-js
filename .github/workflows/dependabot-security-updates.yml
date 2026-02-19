@@ -131,8 +131,7 @@ jobs:
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_BRANCH: ${{ steps.target-ref.outputs.branch }}
-        run: bash scripts/dependabot-security-updates/generate-sarif.sh result.jsonl security-report.sarif "$TARGET_BRANCH"
+        run: bash scripts/dependabot-security-updates/generate-sarif.sh result.jsonl security-report.sarif
 
       - name: Upload SARIF to Code Scanning
         if: steps.download.outcome == 'success'

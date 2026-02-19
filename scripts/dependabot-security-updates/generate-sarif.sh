@@ -5,24 +5,18 @@
 # Generates a SARIF file from Dependabot CLI JSONL output by cross-referencing
 # dependencies against the GitHub Advisory Database.
 #
-# Usage: generate-sarif.sh <result.jsonl> <output.sarif> <branch>
+# Usage: generate-sarif.sh <result.jsonl> <output.sarif>
 # Env:   GH_TOKEN (required for GitHub API authentication)
-#
-# The branch parameter is embedded into SARIF rule IDs so that alerts for
-# different branches (e.g. v5-stable, v4-stable) are treated as independent
-# alerts by GitHub Code Scanning. This allows dismissing an advisory on one
-# branch without affecting the same advisory on another branch.
 
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-  echo "Usage: $0 <result.jsonl> <output.sarif> <branch>"
+if [ $# -ne 2 ]; then
+  echo "Usage: $0 <result.jsonl> <output.sarif>"
   exit 1
 fi
 
 INPUT="$1"
 OUTPUT="$2"
-BRANCH="$3"
 
 if [ ! -f "$INPUT" ]; then
   echo "Result file not found: $INPUT"
@@ -145,7 +139,7 @@ trap 'rm -f "$DEPS_FILE"' EXIT
 
 # Convert advisories to SARIF 2.1.0 format.
 # Each advisory becomes a rule + one result per affected package.
-echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" --arg branch "$BRANCH" '
+echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" '
   # Map severity to SARIF level
   def to_sarif_level:
     if . == "critical" or . == "high" then "error"
@@ -171,8 +165,7 @@ echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" --arg branch "$BRA
   reduce .[] as $adv (
     { rules: [], results: [], rule_ids: {} };
 
-    $adv.ghsa_id as $ghsa_id |
-    ($ghsa_id + "/" + $branch) as $rule_id |
+    $adv.ghsa_id as $rule_id |
     $adv.severity as $sev |
 
     # Find which of our deps are affected by this advisory
@@ -197,8 +190,8 @@ echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" --arg branch "$BRA
            fullDescription: { text: ($adv.description // $adv.summary // "No description available") },
            helpUri: $adv.html_url,
            help: {
-             text: ("Advisory: " + $ghsa_id + " (" + $branch + ")\nSeverity: " + ($sev // "unknown") + "\nMore info: " + $adv.html_url),
-             markdown: ("**Advisory:** [" + $ghsa_id + "](" + $adv.html_url + ")\n**Branch:** " + $branch + "\n**Severity:** " + ($sev // "unknown") + "\n**CVE:** " + ($adv.cve_id // "N/A"))
+             text: ("Advisory: " + $rule_id + "\nSeverity: " + ($sev // "unknown") + "\nMore info: " + $adv.html_url),
+             markdown: ("**Advisory:** [" + $rule_id + "](" + $adv.html_url + ")\n**Severity:** " + ($sev // "unknown") + "\n**CVE:** " + ($adv.cve_id // "N/A"))
            },
            properties: {
              tags: ["security", "dependency", ($sev // "unknown")],
@@ -214,7 +207,7 @@ echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" --arg branch "$BRA
           ruleId: $rule_id,
           level: ($sev | to_sarif_level),
           message: {
-            text: ($dep.name + "@" + $dep.version + " is affected by " + $ghsa_id + " on " + $branch + " (severity: " + ($sev // "unknown") + "). Vulnerable range: " + $dep.vulnerable_range + ". Patched version: " + $dep.patched + ".")
+            text: ($dep.name + "@" + $dep.version + " is affected by " + $rule_id + " (severity: " + ($sev // "unknown") + "). Vulnerable range: " + $dep.vulnerable_range + ". Patched version: " + $dep.patched + ".")
           },
           locations: [{
             physicalLocation: {
