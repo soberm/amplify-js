@@ -11,5 +11,8 @@
     "@types/node": "^18.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0"
+  },
+  "resolutions": {
+    "axios": "1.7.4"
   }
 }
