@@ -35,26 +35,37 @@ jobs:
         run: yarn install --frozen-lockfile || yarn install
 
       - name: Run yarn audit
-        run: yarn audit --json > audit-output.json 2>&1 || true
+        id: yarn-audit
+        run: |
+          yarn audit --json > audit-output.json 2>&1 || true
+          if ! grep -q '"type":"auditAdvisory"' audit-output.json 2>/dev/null; then
+            echo "No vulnerabilities found — aborting workflow."
+            echo "has_vulnerabilities=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_vulnerabilities=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install audit tooling
+        if: steps.yarn-audit.outputs.has_vulnerabilities == 'true'
         run: |
           cd scripts/security-audit
           yarn install --frozen-lockfile || yarn install
 
       - name: Convert audit to SARIF
+        if: steps.yarn-audit.outputs.has_vulnerabilities == 'true'
         run: |
           yarn --cwd scripts/security-audit ts-node audit-to-sarif.ts \
             ../../audit-output.json ../../audit-results.sarif
 
       - name: Upload SARIF to GitHub Security
-        if: always()
+        if: steps.yarn-audit.outputs.has_vulnerabilities == 'true'
         uses: github/codeql-action/upload-sarif@6c089f53dd51dc3fc7e599c3cb5356453a52ca9e # v2
         with:
           sarif_file: audit-results.sarif
           category: yarn-audit
 
       - name: Create patch PRs
+        if: steps.yarn-audit.outputs.has_vulnerabilities == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE_BRANCH: ci/dependency-review
@@ -67,10 +78,10 @@ jobs:
         if: always()
         run: |
           echo "=== Audit Summary ==="
-          if [ -f audit-results.sarif ]; then
+          if [ "${{ steps.yarn-audit.outputs.has_vulnerabilities }}" != "true" ]; then
+            echo "Clean audit — no vulnerabilities found."
+          else
             TOTAL=$(jq '.runs[0].results | length' audit-results.sarif 2>/dev/null || echo 0)
             echo "Vulnerabilities found: $TOTAL"
             jq -r '.runs[0].results[] | "  [\(.level)] \(.message.text)"' audit-results.sarif 2>/dev/null || true
-          else
-            echo "No SARIF results available"
           fi
