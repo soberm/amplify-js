@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { Octokit } from "@octokit/rest";
 import { satisfies as semverSatisfies } from "semver";
 
 // --- Types ---
@@ -175,7 +175,10 @@ function extractDeps(jsonlPath: string): Dependency[] {
 }
 
 /** Query GitHub Advisory Database for advisories affecting our deps. */
-function fetchAdvisories(deps: Dependency[]): Advisory[] {
+async function fetchAdvisories(
+  octokit: Octokit,
+  deps: Dependency[]
+): Promise<Advisory[]> {
   const allAdvisories: Advisory[] = [];
 
   for (let offset = 0; offset < deps.length; offset += BATCH_SIZE) {
@@ -185,34 +188,17 @@ function fetchAdvisories(deps: Dependency[]): Advisory[] {
       `Querying advisories for deps ${offset}..${offset + batch.length} ...`
     );
 
-    let page = 1;
-    while (true) {
-      let response: Advisory[];
-      try {
-        const raw = execSync(
-          `gh api --method GET "/advisories" ` +
-            `-f ecosystem=npm ` +
-            `-f "affects=${affects}" ` +
-            `-F per_page=100 ` +
-            `-F "page=${page}" ` +
-            `--header "X-GitHub-Api-Version: 2022-11-28"`,
-          { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
-        );
-        response = JSON.parse(raw);
-      } catch {
-        console.log("  Warning: API request failed, skipping batch.");
-        break;
-      }
-
-      if (!Array.isArray(response)) {
-        console.log("  Warning: unexpected API response, skipping batch.");
-        break;
-      }
-      if (response.length === 0) break;
-
-      allAdvisories.push(...response);
-      if (response.length < 100) break;
-      page++;
+    try {
+      const advisories = await octokit.paginate(
+        octokit.securityAdvisories.listGlobalAdvisories,
+        { ecosystem: "npm", affects, per_page: 100 }
+      ) as Advisory[];
+      allAdvisories.push(...advisories);
+    } catch (err) {
+      console.log(
+        `  Warning: API request failed, skipping batch.`,
+        err instanceof Error ? err.message : err
+      );
     }
   }
 
@@ -254,7 +240,6 @@ function filterAdvisories(
 
 /** Build SARIF from filtered advisories and our dependency list. */
 function buildSarif(advisories: Advisory[], deps: Dependency[]): Sarif {
-  const depSet = new Set(deps.map((d) => `${d.name}@${d.version}`));
   const rules: SarifRule[] = [];
   const results: SarifResult[] = [];
   const ruleIds = new Set<string>();
@@ -275,9 +260,7 @@ function buildSarif(advisories: Advisory[], deps: Dependency[]): Sarif {
       if (vuln.package.ecosystem !== "npm") continue;
       for (const dep of deps) {
         if (dep.name !== vuln.package.name) continue;
-        if (
-          !isVersionAffected(dep.version, vuln.vulnerable_version_range)
-        )
+        if (!isVersionAffected(dep.version, vuln.vulnerable_version_range))
           continue;
         affected.push({
           name: dep.name,
@@ -355,13 +338,21 @@ function buildSarif(advisories: Advisory[], deps: Dependency[]): Sarif {
 
 // --- Main ---
 
-function main(): void {
+async function main(): Promise<void> {
   const [inputPath, outputPath] = process.argv.slice(2);
 
   if (!inputPath || !outputPath) {
     console.error("Usage: npx tsx generate-sarif.ts <result.jsonl> <output.sarif>");
     process.exit(1);
   }
+
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+  if (!token) {
+    console.error("GH_TOKEN or GITHUB_TOKEN environment variable is required.");
+    process.exit(1);
+  }
+
+  const octokit = new Octokit({ auth: token });
 
   // Extract deps
   let deps: Dependency[];
@@ -382,7 +373,7 @@ function main(): void {
   }
 
   // Fetch advisories
-  const rawAdvisories = fetchAdvisories(deps);
+  const rawAdvisories = await fetchAdvisories(octokit, deps);
   console.log(`Found ${rawAdvisories.length} unique advisories.`);
 
   if (rawAdvisories.length === 0) {

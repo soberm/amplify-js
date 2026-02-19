@@ -1,0 +1,6 @@
+# Test artifacts
+*.jsonl
+*.sarif
+
+# Dependencies
+node_modules/

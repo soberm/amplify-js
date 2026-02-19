@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { dirname } from "node:path";
+import { Octokit } from "@octokit/rest";
 
 // --- Types ---
 
@@ -36,7 +37,7 @@ interface CreatePrEvent {
 
 // --- Helpers ---
 
-function exec(cmd: string, opts?: { ignoreError?: boolean }): string {
+function git(cmd: string, opts?: { ignoreError?: boolean }): string {
   try {
     return execSync(cmd, {
       encoding: "utf8",
@@ -75,13 +76,26 @@ Security advisory from GitHub Advisory Database.
 By submitting this pull request, I confirm that my contribution is made under the terms of the Apache 2.0 license.`;
 }
 
+function parseRepo(): { owner: string; repo: string } {
+  const url = git("git remote get-url origin");
+  const match = url.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
+  if (!match) throw new Error(`Cannot parse repo from remote: ${url}`);
+  return { owner: match[1], repo: match[2] };
+}
+
 // --- Main ---
 
-function main(): void {
+async function main(): Promise<void> {
   const [inputPath] = process.argv.slice(2);
 
   if (!inputPath) {
     console.error("Usage: npx tsx create-prs.ts <result.jsonl>");
+    process.exit(1);
+  }
+
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+  if (!token) {
+    console.error("GH_TOKEN or GITHUB_TOKEN environment variable is required.");
     process.exit(1);
   }
 
@@ -95,6 +109,9 @@ function main(): void {
     console.log(`Result file not found: ${inputPath}`);
     process.exit(0);
   }
+
+  const octokit = new Octokit({ auth: token });
+  const { owner, repo } = parseRepo();
 
   // Parse create_pull_request events
   const content = readFileSync(inputPath, "utf8");
@@ -117,9 +134,9 @@ function main(): void {
   }
 
   // Configure git
-  exec(`git config --global user.name "${gitUser}"`);
-  exec(`git config --global user.email "${gitEmail}"`);
-  exec("git config --global advice.detachedHead false");
+  git(`git config --global user.name "${gitUser}"`);
+  git(`git config --global user.email "${gitEmail}"`);
+  git("git config --global advice.detachedHead false");
 
   let created = 0;
 
@@ -142,66 +159,85 @@ function main(): void {
     console.log(`  Base SHA: ${baseSha}`);
     console.log(`  Branch:   ${branchName}`);
 
-    // Check for existing PR
-    const existingPr = exec(
-      `gh pr list --head "${branchName}" --state open --json number --jq '.[0].number'`,
-      { ignoreError: true }
-    );
-    if (existingPr) {
-      console.log(`  PR #${existingPr} already open, skipping.`);
-      continue;
+    // Check for existing open PR
+    try {
+      const { data: prs } = await octokit.pulls.list({
+        owner,
+        repo,
+        head: `${owner}:${branchName}`,
+        state: "open",
+        per_page: 1,
+      });
+      if (prs.length > 0) {
+        console.log(`  PR #${prs[0].number} already open, skipping.`);
+        continue;
+      }
+    } catch (err) {
+      console.log(
+        `  Warning: failed to check existing PRs.`,
+        err instanceof Error ? err.message : err
+      );
     }
 
     // Create branch from base commit
-    exec("git fetch origin");
-    exec(`git checkout ${baseSha}`, { ignoreError: true });
-    exec(`git checkout -b ${branchName}`);
+    git("git fetch origin");
+    git(`git checkout ${baseSha}`, { ignoreError: true });
+    git(`git checkout -b ${branchName}`);
 
     // Apply file changes
     for (const file of data["updated-dependency-files"]) {
       const filePath = (file.directory + "/" + file.name).replace(/^\//, "");
 
       if (file.deleted) {
-        exec(`git rm -f "${filePath}"`, { ignoreError: true });
+        git(`git rm -f "${filePath}"`, { ignoreError: true });
       } else {
         mkdirSync(dirname(filePath), { recursive: true });
         writeFileSync(filePath, file.content);
-        exec(`git add "${filePath}"`);
+        git(`git add "${filePath}"`);
       }
     }
 
     // Commit and push
-    const commitResult = exec(`git commit -m "${commitMsg}"`, {
+    const commitResult = git(`git commit -m "${commitMsg}"`, {
       ignoreError: true,
     });
     if (!commitResult || commitResult.includes("nothing to commit")) {
       console.log("  No changes to commit, skipping.");
-      exec(`git checkout ${baseBranch}`, { ignoreError: true });
+      git(`git checkout ${baseBranch}`, { ignoreError: true });
       continue;
     }
 
-    exec(`git push -f origin ${branchName}`);
+    git(`git push -f origin ${branchName}`);
 
-    // Create PR
-    const bodyFile = `/tmp/pr-body-${Date.now()}.md`;
-    writeFileSync(bodyFile, buildPrBody(prBody));
+    // Create PR via octokit
+    try {
+      const { data: pr } = await octokit.pulls.create({
+        owner,
+        repo,
+        title: prTitle,
+        body: buildPrBody(prBody),
+        head: branchName,
+        base: baseBranch,
+      });
 
-    const prUrl = exec(
-      `gh pr create --title "${prTitle}" --body-file "${bodyFile}" ` +
-        `--base "${baseBranch}" --head "${branchName}" --label "dependencies"`,
-      { ignoreError: true }
-    );
+      // Add label
+      await octokit.issues.addLabels({
+        owner,
+        repo,
+        issue_number: pr.number,
+        labels: ["dependencies"],
+      });
 
-    exec(`rm -f "${bodyFile}"`, { ignoreError: true });
-
-    if (prUrl) {
-      console.log(`  PR created: ${prUrl}`);
+      console.log(`  PR created: ${pr.html_url}`);
       created++;
-    } else {
-      console.log("  Failed to create PR.");
+    } catch (err) {
+      console.log(
+        `  Failed to create PR.`,
+        err instanceof Error ? err.message : err
+      );
     }
 
-    exec(`git checkout ${baseBranch}`, { ignoreError: true });
+    git(`git checkout ${baseBranch}`, { ignoreError: true });
   }
 
   console.log(`Done. Created ${created} PR(s).`);
