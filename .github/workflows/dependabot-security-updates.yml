@@ -82,6 +82,11 @@ jobs:
           name: dependabot-result
         continue-on-error: true
 
+      - name: Install script dependencies
+        if: steps.download.outcome == 'success'
+        run: yarn --frozen-lockfile
+        working-directory: scripts/dependabot-security-updates
+
       - name: Create PRs
         if: steps.download.outcome == 'success'
         env:
@@ -89,7 +94,8 @@ jobs:
           BASE_BRANCH: ${{ inputs.branch || 'test/sarif-provenance' }}
           GIT_USER: ${{ vars.GH_USER || 'github-actions[bot]' }}
           GIT_EMAIL: ${{ vars.GH_EMAIL || 'github-actions[bot]@users.noreply.github.com' }}
-        run: bash scripts/dependabot-security-updates/create-prs.sh result.jsonl
+        run: npx tsx src/create-prs.ts ../../result.jsonl
+        working-directory: scripts/dependabot-security-updates
 
       - name: Summary
         if: always()
@@ -127,11 +133,17 @@ jobs:
           name: dependabot-result
         continue-on-error: true
 
+      - name: Install script dependencies
+        if: steps.download.outcome == 'success'
+        run: yarn --frozen-lockfile
+        working-directory: scripts/dependabot-security-updates
+
       - name: Generate SARIF
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/dependabot-security-updates/generate-sarif.sh result.jsonl security-report.sarif
+        run: npx tsx src/generate-sarif.ts ../../result.jsonl ../../security-report.sarif
+        working-directory: scripts/dependabot-security-updates
 
       - name: Upload SARIF to Code Scanning
         if: steps.download.outcome == 'success'

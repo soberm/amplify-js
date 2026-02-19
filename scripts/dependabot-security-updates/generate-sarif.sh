@@ -132,13 +132,115 @@ if [ "$ADVISORY_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# Write deps to a temp file to avoid shell argument length limits
+# Filter advisories: remove vulnerability entries where our dep version is
+# outside the vulnerable range. The GitHub Advisory API returns the full
+# advisory if *any* package in the batch matches, so we need to verify each
+# vulnerability entry against our actual versions using semver.
+ADVISORIES_FILE=$(mktemp)
 DEPS_FILE=$(mktemp)
+echo "$ALL_ADVISORIES" > "$ADVISORIES_FILE"
 echo "$DEPS" > "$DEPS_FILE"
-trap 'rm -f "$DEPS_FILE"' EXIT
+trap 'rm -f "$ADVISORIES_FILE" "$DEPS_FILE"' EXIT
+
+ALL_ADVISORIES=$(node -e '
+const fs = require("fs");
+const advisories = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const deps = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+
+// Build lookup: { "pkg": ["1.0.0", "2.3.3"] }
+const depVersions = {};
+for (const d of deps) {
+  (depVersions[d.name] ||= []).push(d.version);
+}
+
+// Parse a single comparator like ">= 3.0.0" into { op, major, minor, patch }
+function parseComparator(s) {
+  s = s.trim();
+  const m = s.match(/^(>=|<=|>|<|=)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+  if (!m) return null;
+  return {
+    op: m[1] || "=",
+    major: parseInt(m[2], 10),
+    minor: m[3] != null ? parseInt(m[3], 10) : 0,
+    patch: m[4] != null ? parseInt(m[4], 10) : 0,
+  };
+}
+
+// Compare two version tuples: -1, 0, 1
+function cmpVer(a, b) {
+  if (a.major !== b.major) return a.major < b.major ? -1 : 1;
+  if (a.minor !== b.minor) return a.minor < b.minor ? -1 : 1;
+  if (a.patch !== b.patch) return a.patch < b.patch ? -1 : 1;
+  return 0;
+}
+
+// Check if version satisfies a single comparator
+function satisfies(ver, comp) {
+  const c = cmpVer(ver, comp);
+  switch (comp.op) {
+    case ">=": return c >= 0;
+    case ">":  return c > 0;
+    case "<=": return c <= 0;
+    case "<":  return c < 0;
+    case "=":  return c === 0;
+    default:   return c === 0;
+  }
+}
+
+// Check if version is in a vulnerable range string like ">= 3.0.0, < 3.0.4"
+function inRange(version, rangeStr) {
+  if (!rangeStr) return true; // no range means assume affected
+  const ver = parseComparator("= " + version);
+  if (!ver) return true; // unparseable version, assume affected
+  const parts = rangeStr.split(",");
+  return parts.every(part => {
+    const comp = parseComparator(part);
+    if (!comp) return true; // unparseable constraint, assume affected
+    return satisfies(ver, comp);
+  });
+}
+
+// Filter: keep only vulnerability entries that actually match our dep versions
+const filtered = advisories.map(adv => {
+  const vulns = (adv.vulnerabilities || []).filter(v => {
+    if (v.package?.ecosystem !== "npm") return false;
+    const versions = depVersions[v.package.name];
+    if (!versions) return false;
+    return versions.some(ver => inRange(ver, v.vulnerable_version_range));
+  });
+  return { ...adv, vulnerabilities: vulns };
+}).filter(adv => adv.vulnerabilities.length > 0);
+
+process.stdout.write(JSON.stringify(filtered));
+' "$ADVISORIES_FILE" "$DEPS_FILE")
+
+FILTERED_COUNT=$(echo "$ALL_ADVISORIES" | jq 'length')
+echo "After semver filtering: $FILTERED_COUNT advisories with matching versions."
+
+if [ "$FILTERED_COUNT" -eq 0 ]; then
+  echo "No advisories match actual dependency versions. Writing empty SARIF."
+  jq -n '{
+    "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+    version: "2.1.0",
+    runs: [{
+      tool: {
+        driver: {
+          name: "dependabot-security-audit",
+          version: "1.0.0",
+          informationUri: "https://github.com/dependabot/cli",
+          rules: []
+        }
+      },
+      results: []
+    }]
+  }' > "$OUTPUT"
+  exit 0
+fi
 
 # Convert advisories to SARIF 2.1.0 format.
 # Each advisory becomes a rule + one result per affected package.
+# At this point, advisory vulnerabilities have been pre-filtered by the semver
+# check above, so name-matching in jq is sufficient.
 echo "$ALL_ADVISORIES" | jq --slurpfile dep_list "$DEPS_FILE" '
   # Map severity to SARIF level
   def to_sarif_level:
