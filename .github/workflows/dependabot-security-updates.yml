@@ -107,8 +107,18 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - name: Checkout
+      - name: Checkout workflow scripts
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Resolve target branch SHA
+        id: target-ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ inputs.branch || 'v5-stable' }}"
+          SHA=$(gh api "repos/${{ github.repository }}/git/ref/heads/${BRANCH}" --jq '.object.sha')
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Download result
         id: download
@@ -129,6 +139,8 @@ jobs:
         with:
           sarif_file: security-report.sarif
           category: dependabot-security-audit
+          ref: refs/heads/${{ steps.target-ref.outputs.branch }}
+          sha: ${{ steps.target-ref.outputs.sha }}
 
       - name: Summary
         if: always()
