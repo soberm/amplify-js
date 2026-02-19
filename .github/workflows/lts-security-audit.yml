@@ -1,0 +1,81 @@
+name: LTS Security Audit
+
+on:
+  push:
+    branches:
+      - ci/dependency-review
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to audit (e.g., v5-stable, v4-stable)'
+        required: false
+        default: 'v5-stable'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  audit-lts-branches:
+    name: Audit ${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - ci/dependency-review
+    
+    steps:
+      - name: Checkout ${{ matrix.branch }}
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ github.event.inputs.branch || matrix.branch }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '22'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile || yarn install
+        continue-on-error: true
+
+      - name: Run Yarn Audit
+        id: audit
+        run: |
+          echo "Running yarn audit for ${{ matrix.branch }}..."
+          yarn audit --json > audit-output.json 2>&1 || true
+          
+          # Also capture human-readable output for logs
+          yarn audit > audit-summary.txt 2>&1 || true
+          
+          echo "Audit complete. Processing results..."
+        continue-on-error: true
+
+      - name: Setup TypeScript for converter
+        run: |
+          cd scripts/security-audit
+          yarn install --frozen-lockfile || yarn install
+        continue-on-error: true
+
+      - name: Convert audit to SARIF
+        run: |
+          yarn --cwd scripts/security-audit ts-node audit-to-sarif.ts ../../audit-output.json ../../audit-results.sarif
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@6c089f53dd51dc3fc7e599c3cb5356453a52ca9e # v2
+        with:
+          sarif_file: audit-results.sarif
+          category: security-audit-${{ matrix.branch }}
+        continue-on-error: true
+
+      - name: Display Audit Summary
+        if: always()
+        run: |
+          echo "=== Yarn Audit Summary for ${{ matrix.branch }} ==="
+          cat audit-summary.txt || echo "No audit summary available"
+          echo ""
+          echo "SARIF report uploaded to GitHub Code Scanning"
