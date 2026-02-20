@@ -41,6 +41,7 @@ jobs:
           if ! grep -q '"type":"auditAdvisory"' audit-output.json 2>/dev/null; then
             echo "No vulnerabilities found — aborting workflow."
             echo "has_vulnerabilities=false" >> "$GITHUB_OUTPUT"
+            echo "Test"
           else
             echo "has_vulnerabilities=true" >> "$GITHUB_OUTPUT"
           fi
