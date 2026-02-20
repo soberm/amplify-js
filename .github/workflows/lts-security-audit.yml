@@ -1,0 +1,109 @@
+name: LTS Security Audit
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # Daily at 9 AM UTC
+  push:
+    branches:
+      - feat/lts-security-audit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  lts-security-audit:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: lts-security-audit-${{ matrix.branch }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - v5-stable
+          - v4-stable
+
+    steps:
+      - name: Checkout LTS branch
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile || yarn install
+
+      - name: Capture branch SHA
+        id: branch-sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run yarn audit
+        id: yarn-audit
+        run: |
+          yarn audit --groups dependencies --json > lts-security-audit.json 2>&1 || true
+
+          # Validate that yarn audit produced parseable output
+          if [ ! -s lts-security-audit.json ]; then
+            echo "::error::yarn audit produced no output — possible failure."
+            echo "audit_success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if ! grep -q '"type":' lts-security-audit.json 2>/dev/null; then
+            echo "::error::yarn audit output is not valid — possible failure."
+            echo "audit_success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "audit_success=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout audit tooling
+        if: steps.yarn-audit.outputs.audit_success == 'true'
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          path: _audit-tools
+          sparse-checkout: scripts/lts-security-audit
+
+      - name: Install audit tooling
+        if: steps.yarn-audit.outputs.audit_success == 'true'
+        run: |
+          cd _audit-tools/scripts/lts-security-audit
+          yarn install --frozen-lockfile || yarn install
+
+      - name: Convert audit to SARIF
+        if: steps.yarn-audit.outputs.audit_success == 'true'
+        run: |
+          yarn --cwd _audit-tools/scripts/lts-security-audit ts-node audit-to-sarif.ts \
+            ${{ github.workspace }}/lts-security-audit.json ${{ github.workspace }}/lts-security-audit.sarif
+
+      - name: Upload SARIF to GitHub Security
+        if: steps.yarn-audit.outputs.audit_success == 'true'
+        uses: github/codeql-action/upload-sarif@6c089f53dd51dc3fc7e599c3cb5356453a52ca9e # v2
+        with:
+          sarif_file: lts-security-audit.sarif
+          category: lts-security-audit-${{ matrix.branch }}
+          ref: refs/heads/${{ matrix.branch }}
+          sha: ${{ steps.branch-sha.outputs.sha }}
+
+      - name: Audit summary
+        if: always()
+        run: |
+          echo "=== Audit Summary (${{ matrix.branch }}) ==="
+          if [ "${{ steps.yarn-audit.outputs.audit_success }}" != "true" ]; then
+            echo "Audit failed — see errors above."
+            exit 0
+          fi
+
+          TOTAL=$(jq '.runs[0].results | length' lts-security-audit.sarif 2>/dev/null || echo 0)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "Clean audit — no vulnerabilities found."
+          else
+            echo "Vulnerabilities found: $TOTAL"
+            jq -r '.runs[0].results[] | "  [\(.level)] \(.message.text)"' lts-security-audit.sarif 2>/dev/null || true
+          fi

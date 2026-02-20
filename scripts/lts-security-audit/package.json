@@ -1,0 +1,14 @@
+{
+  "name": "amplify-js-lts-security-audit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Security audit tools for amplify-js LTS branches",
+  "scripts": {
+    "audit-to-sarif": "ts-node audit-to-sarif.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}
