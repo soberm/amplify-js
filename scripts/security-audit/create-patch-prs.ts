@@ -282,13 +282,47 @@ function main(): void {
 			const rawPkgJson = fs.readFileSync(pkgJsonPath, 'utf-8');
 			const indent = rawPkgJson.match(/^(\t| +)/m)?.[1] ?? '\t';
 			const pkgJson = JSON.parse(rawPkgJson);
+
+			const resolvedVersion = resolveVersion(info.patchedVersion);
+
+			// Update resolutions
 			pkgJson.resolutions = pkgJson.resolutions || {};
-			pkgJson.resolutions[pkg] = resolveVersion(info.patchedVersion);
+			pkgJson.resolutions[pkg] = resolvedVersion;
+
+			// Also update overrides if the package is pinned there
+			if (pkgJson.overrides?.[pkg]) {
+				pkgJson.overrides[pkg] = resolvedVersion;
+			}
+
+			// Snapshot dependencies before yarn install — yarn 1 can
+			// mutate this section when resolutions force a major-version
+			// jump, adding the old version as a direct dependency.
+			const depsBefore = pkgJson.dependencies
+				? JSON.stringify(pkgJson.dependencies)
+				: undefined;
+
 			fs.writeFileSync(
 				pkgJsonPath,
 				JSON.stringify(pkgJson, null, indent) + '\n',
 			);
 			run('yarn install', { ignoreError: true });
+
+			// Restore dependencies if yarn mutated them
+			if (depsBefore) {
+				const afterRaw = fs.readFileSync(pkgJsonPath, 'utf-8');
+				const afterPkg = JSON.parse(afterRaw);
+				const depsAfter = JSON.stringify(afterPkg.dependencies);
+				if (depsAfter !== depsBefore) {
+					console.log(
+						'  Restoring dependencies (yarn mutated them during install)...',
+					);
+					afterPkg.dependencies = JSON.parse(depsBefore);
+					fs.writeFileSync(
+						pkgJsonPath,
+						JSON.stringify(afterPkg, null, indent) + '\n',
+					);
+				}
+			}
 		}
 
 		// Check if anything actually changed
