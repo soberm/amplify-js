@@ -31,6 +31,13 @@ interface YarnV1AuditLine {
 	type: string;
 	data: {
 		advisory?: YarnV1AuditAdvisory;
+		resolution?: {
+			id: number;
+			path: string;
+			dev: boolean;
+			optional: boolean;
+			bundled: boolean;
+		};
 	};
 }
 
@@ -97,6 +104,41 @@ function detectRepo(): string {
 	}
 }
 
+/**
+ * Query GitHub code scanning for dismissed alerts in the yarn-audit tool
+ * and return the set of module names that have been dismissed.
+ */
+function getDismissedPackages(ghRepo: string): Set<string> {
+	const dismissed = new Set<string>();
+	if (!ghRepo) return dismissed;
+
+	try {
+		const json = run(
+			`gh api "/repos/${ghRepo}/code-scanning/alerts?state=dismissed&tool_name=yarn+audit&per_page=100" --paginate`,
+			{ ignoreError: true },
+		);
+		if (!json) return dismissed;
+
+		const alerts = JSON.parse(json);
+		if (!Array.isArray(alerts)) return dismissed;
+
+		for (const alert of alerts) {
+			// Alert message text is like "tar@6.2.1 has a high severity..."
+			const msg: string = alert.most_recent_instance?.message?.text ?? '';
+			const match = msg.match(/^(.+?)@/);
+			if (match) {
+				dismissed.add(match[1]);
+			}
+		}
+	} catch {
+		console.log(
+			'  Warning: could not fetch dismissed alerts, skipping filter.',
+		);
+	}
+
+	return dismissed;
+}
+
 // ── parse audit output ──────────────────────────────────────────────────────
 
 function parsePatchableVulnerabilities(
@@ -104,6 +146,8 @@ function parsePatchableVulnerabilities(
 ): Map<string, PackageInfo> {
 	const raw = fs.readFileSync(auditFile, 'utf-8');
 	const packages = new Map<string, PackageInfo>();
+	// Track whether a package has at least one prod (non-dev) resolution path
+	const hasProdPath = new Map<string, boolean>();
 
 	for (const line of raw.split('\n')) {
 		if (!line.trim()) continue;
@@ -118,6 +162,15 @@ function parsePatchableVulnerabilities(
 		if (parsed.type !== 'auditAdvisory' || !parsed.data.advisory) continue;
 
 		const adv = parsed.data.advisory;
+		const res = parsed.data.resolution;
+
+		// Track prod vs dev resolution paths
+		if (res && !res.dev) {
+			hasProdPath.set(adv.module_name, true);
+		} else if (!hasProdPath.has(adv.module_name)) {
+			hasProdPath.set(adv.module_name, false);
+		}
+
 		if (
 			!adv.patched_versions ||
 			adv.patched_versions === '<0.0.0' ||
@@ -142,6 +195,14 @@ function parsePatchableVulnerabilities(
 			if (!existing.vulns.some(v => `${v.severity}:${v.title}` === key)) {
 				existing.vulns.push(vuln);
 			}
+		}
+	}
+
+	// Remove dev-only packages
+	for (const [pkg, isProd] of hasProdPath) {
+		if (!isProd) {
+			console.log(`Skipping ${pkg} (dev-only dependency)`);
+			packages.delete(pkg);
 		}
 	}
 
@@ -232,6 +293,23 @@ function main(): void {
 		return;
 	}
 
+	// Filter out packages whose alerts have been dismissed
+	const dismissed = getDismissedPackages(ghRepo);
+	if (dismissed.size > 0) {
+		for (const pkg of dismissed) {
+			if (packages.has(pkg)) {
+				console.log(`Skipping ${pkg} (alert dismissed)`);
+				packages.delete(pkg);
+			}
+		}
+	}
+
+	if (packages.size === 0) {
+		console.log('No patchable vulnerabilities remaining after filtering.');
+
+		return;
+	}
+
 	console.log(`Found ${packages.size} package(s) with available patches:`);
 	for (const [pkg, info] of packages) {
 		console.log(
@@ -276,14 +354,29 @@ function main(): void {
 		});
 
 		if (!lockChanged && !DRY_RUN) {
+			// yarn upgrade may have added the package to dependencies even
+			// though it didn't change the lockfile. Reset package.json to
+			// a clean state before applying the resolution.
+			run('git checkout -- package.json', { ignoreError: true });
+
 			// Attempt 2: add a resolution entry
 			console.log('  Direct upgrade had no effect, adding resolution...');
 			const pkgJsonPath = path.join(repoRoot, 'package.json');
 			const rawPkgJson = fs.readFileSync(pkgJsonPath, 'utf-8');
 			const indent = rawPkgJson.match(/^(\t| +)/m)?.[1] ?? '\t';
 			const pkgJson = JSON.parse(rawPkgJson);
+
+			const resolvedVersion = resolveVersion(info.patchedVersion);
+
+			// Update resolutions
 			pkgJson.resolutions = pkgJson.resolutions || {};
-			pkgJson.resolutions[pkg] = resolveVersion(info.patchedVersion);
+			pkgJson.resolutions[pkg] = resolvedVersion;
+
+			// Also update overrides if the package is pinned there
+			if (pkgJson.overrides?.[pkg]) {
+				pkgJson.overrides[pkg] = resolvedVersion;
+			}
+
 			fs.writeFileSync(
 				pkgJsonPath,
 				JSON.stringify(pkgJson, null, indent) + '\n',
