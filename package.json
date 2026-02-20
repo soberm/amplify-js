@@ -33,7 +33,7 @@
 		"publish:verdaccio": "yarn publish:unstable",
 		"generate-metadata": "git rev-parse --short HEAD > packages/core/metadata && git commit -am 'chore(release): Set core metadata [skip release]'",
 		"ts-coverage": "lerna run ts-coverage",
-		"prepare": "husky && ./scripts/setup-git-secrets.sh && ./scripts/set-preid-versions.sh"
+		"prepare": "./scripts/setup-git-secrets.sh && ./scripts/set-preid-versions.sh"
 	},
 	"workspaces": {
 		"packages": [
@@ -160,8 +160,5 @@
 		"brace-expansion": "1.1.12",
 		"tmp": "^0.2.4"
 	},
-	"packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
-	"dependencies": {
-		"fast-xml-parser": "^5.3.4"
-	}
+	"packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

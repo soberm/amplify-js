@@ -276,14 +276,29 @@ function main(): void {
 		});
 
 		if (!lockChanged && !DRY_RUN) {
+			// yarn upgrade may have added the package to dependencies even
+			// though it didn't change the lockfile. Reset package.json to
+			// a clean state before applying the resolution.
+			run('git checkout -- package.json', { ignoreError: true });
+
 			// Attempt 2: add a resolution entry
 			console.log('  Direct upgrade had no effect, adding resolution...');
 			const pkgJsonPath = path.join(repoRoot, 'package.json');
 			const rawPkgJson = fs.readFileSync(pkgJsonPath, 'utf-8');
 			const indent = rawPkgJson.match(/^(\t| +)/m)?.[1] ?? '\t';
 			const pkgJson = JSON.parse(rawPkgJson);
+
+			const resolvedVersion = resolveVersion(info.patchedVersion);
+
+			// Update resolutions
 			pkgJson.resolutions = pkgJson.resolutions || {};
-			pkgJson.resolutions[pkg] = resolveVersion(info.patchedVersion);
+			pkgJson.resolutions[pkg] = resolvedVersion;
+
+			// Also update overrides if the package is pinned there
+			if (pkgJson.overrides?.[pkg]) {
+				pkgJson.overrides[pkg] = resolvedVersion;
+			}
+
 			fs.writeFileSync(
 				pkgJsonPath,
 				JSON.stringify(pkgJson, null, indent) + '\n',
