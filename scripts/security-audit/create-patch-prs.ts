@@ -31,13 +31,6 @@ interface YarnV1AuditLine {
 	type: string;
 	data: {
 		advisory?: YarnV1AuditAdvisory;
-		resolution?: {
-			id: number;
-			path: string;
-			dev: boolean;
-			optional: boolean;
-			bundled: boolean;
-		};
 	};
 }
 
@@ -146,8 +139,6 @@ function parsePatchableVulnerabilities(
 ): Map<string, PackageInfo> {
 	const raw = fs.readFileSync(auditFile, 'utf-8');
 	const packages = new Map<string, PackageInfo>();
-	// Track whether a package has at least one prod (non-dev) resolution path
-	const hasProdPath = new Map<string, boolean>();
 
 	for (const line of raw.split('\n')) {
 		if (!line.trim()) continue;
@@ -162,15 +153,6 @@ function parsePatchableVulnerabilities(
 		if (parsed.type !== 'auditAdvisory' || !parsed.data.advisory) continue;
 
 		const adv = parsed.data.advisory;
-		const res = parsed.data.resolution;
-
-		// Track prod vs dev resolution paths
-		if (res && !res.dev) {
-			hasProdPath.set(adv.module_name, true);
-		} else if (!hasProdPath.has(adv.module_name)) {
-			hasProdPath.set(adv.module_name, false);
-		}
-
 		if (
 			!adv.patched_versions ||
 			adv.patched_versions === '<0.0.0' ||
@@ -195,14 +177,6 @@ function parsePatchableVulnerabilities(
 			if (!existing.vulns.some(v => `${v.severity}:${v.title}` === key)) {
 				existing.vulns.push(vuln);
 			}
-		}
-	}
-
-	// Remove dev-only packages
-	for (const [pkg, isProd] of hasProdPath) {
-		if (!isProd) {
-			console.log(`Skipping ${pkg} (dev-only dependency)`);
-			packages.delete(pkg);
 		}
 	}
 

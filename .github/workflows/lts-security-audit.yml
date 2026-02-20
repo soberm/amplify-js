@@ -37,7 +37,7 @@ jobs:
       - name: Run yarn audit
         id: yarn-audit
         run: |
-          yarn audit --json > audit-output.json 2>&1 || true
+          yarn audit --groups dependencies --json > audit-output.json 2>&1 || true
           if ! grep -q '"type":"auditAdvisory"' audit-output.json 2>/dev/null; then
             echo "No vulnerabilities found — aborting workflow."
             echo "has_vulnerabilities=false" >> "$GITHUB_OUTPUT"
