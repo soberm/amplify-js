@@ -37,6 +37,7 @@ interface YarnV1AuditLine {
 interface PackageInfo {
 	patchedVersion: string;
 	vulns: { severity: string; title: string; url: string }[];
+	advisoryIds: number[];
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -101,13 +102,14 @@ function detectRepo(): string {
  * Query GitHub code scanning for dismissed alerts in the yarn-audit tool
  * and return the set of module names that have been dismissed.
  */
-function getDismissedPackages(ghRepo: string): Set<string> {
+function getDismissedRuleIds(ghRepo: string, ref?: string): Set<string> {
 	const dismissed = new Set<string>();
 	if (!ghRepo) return dismissed;
 
 	try {
+		const refParam = ref ? `&ref=refs/heads/${ref}` : '';
 		const json = run(
-			`gh api "/repos/${ghRepo}/code-scanning/alerts?state=dismissed&tool_name=yarn+audit&per_page=100" --paginate`,
+			`gh api "/repos/${ghRepo}/code-scanning/alerts?state=dismissed&tool_name=yarn+audit&per_page=100${refParam}" --paginate`,
 			{ ignoreError: true },
 		);
 		if (!json) return dismissed;
@@ -116,11 +118,9 @@ function getDismissedPackages(ghRepo: string): Set<string> {
 		if (!Array.isArray(alerts)) return dismissed;
 
 		for (const alert of alerts) {
-			// Alert message text is like "tar@6.2.1 has a high severity..."
-			const msg: string = alert.most_recent_instance?.message?.text ?? '';
-			const match = msg.match(/^(.+?)@/);
-			if (match) {
-				dismissed.add(match[1]);
+			const ruleId: string = alert.rule?.id ?? '';
+			if (ruleId) {
+				dismissed.add(ruleId);
 			}
 		}
 	} catch {
@@ -130,6 +130,42 @@ function getDismissedPackages(ghRepo: string): Set<string> {
 	}
 
 	return dismissed;
+}
+
+/**
+ * Look up open code scanning alert numbers for the given SARIF rule IDs
+ * (format: npm-audit/{advisory_id}).
+ */
+function getAlertNumbers(
+	ghRepo: string,
+	advisoryIds: number[],
+	ref?: string,
+): number[] {
+	if (!ghRepo || advisoryIds.length === 0) return [];
+
+	const alertNumbers: number[] = [];
+	try {
+		const refParam = ref ? `&ref=refs/heads/${ref}` : '';
+		const json = run(
+			`gh api "/repos/${ghRepo}/code-scanning/alerts?state=open&tool_name=yarn+audit&per_page=100${refParam}" --paginate`,
+			{ ignoreError: true },
+		);
+		if (!json) return alertNumbers;
+
+		const alerts = JSON.parse(json);
+		if (!Array.isArray(alerts)) return alertNumbers;
+
+		const ruleIds = new Set(advisoryIds.map(id => `npm-audit/${id}`));
+		for (const alert of alerts) {
+			if (ruleIds.has(alert.rule?.id)) {
+				alertNumbers.push(alert.number);
+			}
+		}
+	} catch {
+		// non-fatal
+	}
+
+	return alertNumbers;
 }
 
 // ── parse audit output ──────────────────────────────────────────────────────
@@ -168,6 +204,7 @@ function parsePatchableVulnerabilities(
 			packages.set(adv.module_name, {
 				patchedVersion: adv.patched_versions,
 				vulns: [vuln],
+				advisoryIds: [adv.id],
 			});
 		} else {
 			if (adv.patched_versions > existing.patchedVersion) {
@@ -176,6 +213,9 @@ function parsePatchableVulnerabilities(
 			const key = `${vuln.severity}:${vuln.title}`;
 			if (!existing.vulns.some(v => `${v.severity}:${v.title}` === key)) {
 				existing.vulns.push(vuln);
+			}
+			if (!existing.advisoryIds.includes(adv.id)) {
+				existing.advisoryIds.push(adv.id);
 			}
 		}
 	}
@@ -189,6 +229,8 @@ function buildPrBody(
 	pkg: string,
 	info: PackageInfo,
 	baseBranch: string,
+	ghRepo: string,
+	alertNumbers: number[],
 ): string {
 	const rows = info.vulns
 		.map(
@@ -196,6 +238,25 @@ function buildPrBody(
 				`| ${v.severity} | ${v.title} | \`${info.patchedVersion}\` | ${v.url} |`,
 		)
 		.join('\n');
+
+	const alertLinks =
+		alertNumbers.length > 0 && ghRepo
+			? alertNumbers
+					.map(
+						n => `- https://github.com/${ghRepo}/security/code-scanning/${n}`,
+					)
+					.join('\n')
+			: '';
+
+	const codeScanningUrl = ghRepo
+		? `https://github.com/${ghRepo}/security/code-scanning?query=is%3Aopen+tool%3A%22yarn+audit%22+ref%3Arefs%2Fheads%2F${encodeURIComponent(baseBranch)}`
+		: '';
+
+	const issueSection = alertLinks
+		? `${alertLinks}\n\nSecurity audit findings on \`${baseBranch}\``
+		: codeScanningUrl
+			? `[Security audit findings on \`${baseBranch}\`](${codeScanningUrl})`
+			: `Security audit findings on \`${baseBranch}\``;
 
 	return `#### Description of changes
 
@@ -209,7 +270,7 @@ ${rows}
 
 #### Issue #, if available
 
-Security audit findings on \`${baseBranch}\`
+${issueSection}
 
 #### Description of how you validated changes
 
@@ -267,12 +328,15 @@ function main(): void {
 		return;
 	}
 
-	// Filter out packages whose alerts have been dismissed
-	const dismissed = getDismissedPackages(ghRepo);
-	if (dismissed.size > 0) {
-		for (const pkg of dismissed) {
-			if (packages.has(pkg)) {
-				console.log(`Skipping ${pkg} (alert dismissed)`);
+	// Filter out packages whose alerts have all been dismissed
+	const dismissedRuleIds = getDismissedRuleIds(ghRepo, baseBranch);
+	if (dismissedRuleIds.size > 0) {
+		for (const [pkg, info] of packages) {
+			const allDismissed = info.advisoryIds.every(id =>
+				dismissedRuleIds.has(`npm-audit/${id}`),
+			);
+			if (allDismissed) {
+				console.log(`Skipping ${pkg} (all alerts dismissed)`);
 				packages.delete(pkg);
 			}
 		}
@@ -374,7 +438,8 @@ function main(): void {
 		run(`git push origin ${branchName} --force`, { ignoreError: true });
 
 		// Create PR using a temp file for the body (avoids shell escaping issues)
-		const body = buildPrBody(pkg, info, baseBranch);
+		const alertNumbers = getAlertNumbers(ghRepo, info.advisoryIds, baseBranch);
+		const body = buildPrBody(pkg, info, baseBranch, ghRepo, alertNumbers);
 		const title = `chore(deps): patch ${pkg} security vulnerabilities (${baseBranch})`;
 
 		if (DRY_RUN) {
