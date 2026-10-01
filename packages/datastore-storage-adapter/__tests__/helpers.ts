@@ -1,10 +1,38 @@
-import Database from 'better-sqlite3';
 import {
 	ModelInit,
 	MutableModel,
 	Schema,
 	InternalSchema,
 } from '@aws-amplify/datastore';
+
+/**
+ * `better-sqlite3` is a native module: opening a database requires a compiled
+ * binding, which isn't available in every environment (e.g. when dependencies
+ * are installed without running install scripts). Node's built-in SQLite
+ * implements the same synchronous subset of the API used by the in-memory test
+ * database below, so fall back to it when the native binding can't be loaded.
+ */
+interface SQLiteStatement {
+	all(...params: unknown[]): unknown[];
+	run(...params: unknown[]): unknown;
+}
+interface SQLiteConnection {
+	prepare(sql: string): SQLiteStatement;
+}
+type SQLiteConnectionConstructor = new (path: string) => SQLiteConnection;
+
+function openInMemoryDatabase(): SQLiteConnection {
+	try {
+		const BetterSqlite3: SQLiteConnectionConstructor = require('better-sqlite3');
+
+		return new BetterSqlite3(':memory:');
+	} catch {
+		const { DatabaseSync }: { DatabaseSync: SQLiteConnectionConstructor } =
+			require('node:sqlite');
+
+		return new DatabaseSync(':memory:');
+	}
+}
 
 export declare class Model {
 	public readonly id: string;
@@ -922,7 +950,7 @@ export class InnerSQLiteDatabase {
 	public sqlog;
 
 	constructor() {
-		this.innerDB = new Database(':memory:');
+		this.innerDB = openInMemoryDatabase();
 		this.sqlog = [];
 	}
 
